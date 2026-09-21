@@ -1,5 +1,6 @@
 #include "gpu.hpp"
 
+#include <qdatetime.h>
 #include <qdir.h>
 #include <qdiriterator.h>
 #include <qfile.h>
@@ -29,6 +30,67 @@ QStringList gpuBusyFiles() {
         if (QFile::exists(busy)) {
             files << busy;
         }
+    }
+    return files;
+}
+
+void collectXeIdleFiles(const QString& cardPath, QStringList& files) {
+    static const QRegularExpression k_tileRe(u"^tile\\d+$"_s);
+    static const QRegularExpression k_gtRe(u"^gt\\d+$"_s);
+
+    const QString devicePath = cardPath + u"/device"_s;
+    QDirIterator tileIt(devicePath, QDir::Dirs | QDir::NoDotAndDotDot);
+    while (tileIt.hasNext()) {
+        const QString tilePath = tileIt.next();
+        if (!k_tileRe.match(tileIt.fileName()).hasMatch()) {
+            continue;
+        }
+        QDirIterator gtIt(tilePath, QDir::Dirs | QDir::NoDotAndDotDot);
+        while (gtIt.hasNext()) {
+            const QString gtPath = gtIt.next();
+            if (!k_gtRe.match(gtIt.fileName()).hasMatch()) {
+                continue;
+            }
+            const QString idleFile = gtPath + u"/gtidle/idle_residency_ms"_s;
+            if (QFile::exists(idleFile)) {
+                files << idleFile;
+            }
+        }
+    }
+}
+
+void collectI915IdleFiles(const QString& cardPath, QStringList& files) {
+    static const QRegularExpression k_gtRe(u"^gt\\d+$"_s);
+
+    QDirIterator i915GtIt(cardPath + u"/gt"_s, QDir::Dirs | QDir::NoDotAndDotDot);
+    while (i915GtIt.hasNext()) {
+        const QString gtPath = i915GtIt.next();
+        if (!k_gtRe.match(i915GtIt.fileName()).hasMatch()) {
+            continue;
+        }
+        const QString rc6File = gtPath + u"/rc6_residency_ms"_s;
+        if (QFile::exists(rc6File) && !files.contains(rc6File)) {
+            files << rc6File;
+        }
+    }
+    const QString i915Power = cardPath + u"/power/rc6_residency_ms"_s;
+    if (QFile::exists(i915Power) && !files.contains(i915Power)) {
+        files << i915Power;
+    }
+}
+
+QStringList intelIdleFiles() {
+    static const QRegularExpression k_cardRe(u"^card\\d+$"_s);
+
+    QStringList files;
+    QDirIterator cardIt(u"/sys/class/drm"_s, QDir::Dirs | QDir::NoDotAndDotDot);
+    while (cardIt.hasNext()) {
+        const QString cardPath = cardIt.next();
+        if (!k_cardRe.match(cardIt.fileName()).hasMatch()) {
+            continue;
+        }
+        collectXeIdleFiles(cardPath, files);
+        collectI915IdleFiles(cardPath, files);
     }
     return files;
 }
@@ -140,6 +202,7 @@ constexpr int k_firstGenericSource = 1;
 Gpu::Gpu(QObject* parent)
     : TickingService(parent) {
     m_busyFiles = gpuBusyFiles();
+    m_intelIdleFiles = intelIdleFiles();
 
     auto* svc = caelestia::config::ConfigSingleton::instance()->services();
     m_userType = svc->gpuType();
@@ -204,7 +267,14 @@ void Gpu::setDetecting(bool value) {
 
 void Gpu::tick() {
     if (m_type == GpuType::Generic) {
-        readGenericUsage();
+        if (!m_busyFiles.isEmpty()) {
+            readGenericUsage();
+        } else if (!m_intelIdleFiles.isEmpty()) {
+            readIntelUsage();
+        }
+        readGpuTemperature();
+    } else if (m_type == GpuType::Intel) {
+        readIntelUsage();
         readGpuTemperature();
     } else if (m_type == GpuType::Nvidia) {
         startNvidiaUsage();
@@ -229,7 +299,9 @@ void Gpu::resolveGpu() {
 
     setName({});
     setDetecting(true);
-    tryNameSource(m_userType == GpuType::Generic ? k_firstGenericSource : k_nvidiaSource, generation);
+    tryNameSource(
+        m_userType == GpuType::Generic || m_userType == GpuType::Intel ? k_firstGenericSource : k_nvidiaSource,
+        generation);
 }
 
 int Gpu::probeEnd() const {
@@ -251,10 +323,12 @@ void Gpu::finishNameSource(int index, int generation, QString name) {
     // Under Auto the NVIDIA name probe doubles as the type probe: a non-empty result
     // means an NVIDIA GPU is present and queryable.
     if (m_userType == GpuType::Auto && index == k_nvidiaSource) {
-        if (!name.isEmpty())
-            setType(GpuType::Nvidia);
-        else
-            setType(m_busyFiles.isEmpty() ? GpuType::None : GpuType::Generic);
+        const GpuType autoType =
+            !name.isEmpty()
+                ? GpuType::Nvidia
+                : (!m_intelIdleFiles.isEmpty() ? GpuType::Intel
+                                               : (!m_busyFiles.isEmpty() ? GpuType::Generic : GpuType::None));
+        setType(autoType);
 
         if (m_type == GpuType::None) {
             setName({});
@@ -360,6 +434,48 @@ void Gpu::startNvidiaUsage() {
                 emit temperatureChanged();
             }
         });
+}
+
+void Gpu::readIntelUsage() {
+    qreal sum = 0.0;
+    int count = 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+    for (const QString& path : std::as_const(m_intelIdleFiles)) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+        bool ok = false;
+        const qint64 residencyMs = f.readAll().trimmed().toLongLong(&ok);
+        f.close();
+        if (!ok) {
+            continue;
+        }
+
+        if (m_intelSamples.contains(path)) {
+            const auto& prev = m_intelSamples.value(path);
+            const qint64 dtMs = nowMs - prev.timestampMs;
+            const qint64 dIdleMs = residencyMs - prev.residencyMs;
+
+            if (dtMs > 0 && dIdleMs >= 0) {
+                const qreal idleFraction = static_cast<qreal>(dIdleMs) / static_cast<qreal>(dtMs);
+                const qreal busyFraction = std::clamp(1.0 - idleFraction, 0.0, 1.0);
+                sum += busyFraction;
+                ++count;
+            }
+        }
+
+        m_intelSamples[path] = { residencyMs, nowMs };
+    }
+
+    if (count > 0) {
+        const qreal newPerc = sum / count;
+        if (std::abs(newPerc - m_percentage) > 0.0001) {
+            m_percentage = newPerc;
+            emit percentageChanged();
+        }
+    }
 }
 
 void Gpu::readGpuTemperature() {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qhash.h>
 #include <qprocess.h>
 #include <qqmlintegration.h>
 #include <qstringlist.h>
@@ -53,6 +54,7 @@ private:
     void finishNameSource(int index, int generation, QString name);
 
     void readGenericUsage();
+    void readIntelUsage();
     void startNvidiaUsage();
     void readGpuTemperature();
     void resetUsage();
@@ -78,6 +80,15 @@ private:
     // /sys/class/drm card busy files, enumerated once at construction (the card
     // set is static at runtime) and reused by resolution and the tick path.
     QStringList m_busyFiles;
+
+    struct IntelResidencySample {
+        qint64 residencyMs = 0;
+        qint64 timestampMs = 0;
+    };
+
+    // /sys/class/drm Intel idle residency files (Xe and i915 drivers)
+    QStringList m_intelIdleFiles;
+    QHash<QString, IntelResidencySample> m_intelSamples;
 
     // Bumped per resolution so callbacks from a superseded probe are dropped
     int m_generation = 0;

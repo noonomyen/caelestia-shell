@@ -27,13 +27,16 @@ PageBase {
         }
     ]
 
-    // GPU types, ordered to match config::GpuType (Auto, Nvidia, Generic, None)
+    // GPU types, ordered to match config::GpuType (Auto, Nvidia, Intel, Generic, None)
     readonly property list<MenuItem> gpuItems: [
         MenuItem {
             text: Tr.trCtx("Auto", "gpu type")
         },
         MenuItem {
             text: "NVIDIA"
+        },
+        MenuItem {
+            text: "Intel"
         },
         MenuItem {
             text: Tr.trCtx("Generic", "gpu type")

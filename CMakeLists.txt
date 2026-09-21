@@ -26,7 +26,17 @@ endif()
 
 string(REGEX REPLACE "^v" "" VERSION "${VERSION}")
 
-project(caelestia-shell VERSION ${VERSION} LANGUAGES CXX)
+set(VERSION_SUFFIX "-patch1" CACHE STRING "Optional version suffix")
+if(NOT "${VERSION_SUFFIX}" STREQUAL "" AND NOT "${VERSION}" MATCHES "${VERSION_SUFFIX}$")
+    string(APPEND VERSION "${VERSION_SUFFIX}")
+endif()
+
+string(REGEX MATCH "^[0-9]+(\\.[0-9]+)*" PROJECT_NUMERIC_VERSION "${VERSION}")
+if("${PROJECT_NUMERIC_VERSION}" STREQUAL "")
+    set(PROJECT_NUMERIC_VERSION "0.0.0")
+endif()
+
+project(caelestia-shell VERSION ${PROJECT_NUMERIC_VERSION} LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
