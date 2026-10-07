@@ -4,3 +4,7 @@
 build/
 .cache/
 logs
+src/
+pkg/
+*.pkg.tar.*
+caelestia-shell/
